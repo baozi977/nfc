@@ -1,17 +1,8 @@
-name: Bootstrap + Build LSPosed Module
+name: Bootstrap & Build LSPosed Module
 
 on:
+  # 手动触发，第一次用这个就行
   workflow_dispatch:
-  push:
-    paths:
-      - "app/**"
-      - "gradle/**"
-      - ".github/workflows/**"
-      - "build.gradle"
-      - "settings.gradle"
-      - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
 
 permissions:
   contents: write
@@ -47,27 +38,25 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "tools platform-tools platforms;android-34 build-tools;34.0.0"
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
-      - name: Bootstrap project (generate full Android project if missing)
+      - name: Bootstrap Android + LSPosed project (generate all files)
         shell: bash
         run: |
           set -euxo pipefail
 
-          # 如果已经有 gradlew 和 app/build.gradle，就认为工程已存在（不会重复生成）
+          # 如果已经有 gradlew 和 app/build.gradle，说明工程已经生成过，就不再覆盖
           if [[ -f "gradlew" && -f "app/build.gradle" ]]; then
             echo "Project already exists, skip bootstrap."
             exit 0
           fi
 
-          # ====== 生成目录 ======
           mkdir -p app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')
           mkdir -p app/src/main/res/layout
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/assets
           mkdir -p gradle/wrapper
 
-          # ====== settings.gradle (Groovy) ======
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -89,21 +78,18 @@ jobs:
           include ':app'
           EOF
 
-          # ====== 顶层 build.gradle ======
           cat > build.gradle <<EOF
           plugins {
               id 'com.android.application' version '${AGP_VERSION}' apply false
           }
           EOF
 
-          # ====== gradle.properties ======
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           android.enableJetifier=true
           EOF
 
-          # ====== app/build.gradle ======
           cat > app/build.gradle <<EOF
           plugins {
               id 'com.android.application'
@@ -138,19 +124,15 @@ jobs:
           }
 
           dependencies {
-              // Xposed API：必须 compileOnly，运行时由 LSPosed/Xposed 提供
               compileOnly 'de.robv.android.xposed:api:82'
-
               implementation 'androidx.appcompat:appcompat:1.6.1'
           }
           EOF
 
-          # ====== proguard-rules.pro ======
           cat > app/proguard-rules.pro <<'EOF'
           # no-op
           EOF
 
-          # ====== AndroidManifest.xml ======
           cat > app/src/main/AndroidManifest.xml <<EOF
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -179,14 +161,12 @@ jobs:
           </manifest>
           EOF
 
-          # ====== strings.xml ======
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <resources>
               <string name="app_name">Pixel NFC Japan Hook</string>
           </resources>
           EOF
 
-          # ====== layout ======
           cat > app/src/main/res/layout/activity_main.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -202,7 +182,6 @@ jobs:
           </LinearLayout>
           EOF
 
-          # ====== MainActivity ======
           cat > app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')/MainActivity.java <<EOF
           package ${NAMESPACE};
 
@@ -218,7 +197,6 @@ jobs:
           }
           EOF
 
-          # ====== XposedInit (你的 Hook) ======
           cat > app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')/XposedInit.java <<EOF
           package ${NAMESPACE};
 
@@ -251,15 +229,15 @@ jobs:
           }
           EOF
 
-          # ====== assets/xposed_init ======
           echo "${NAMESPACE}.XposedInit" > app/src/main/assets/xposed_init
 
-          echo "Bootstrap files generated."
+          echo "Bootstrap finished."
 
       - name: Generate Gradle Wrapper (if missing)
         shell: bash
         run: |
           set -euxo pipefail
+
           if [[ -f "gradlew" ]]; then
             echo "Gradle wrapper already exists."
             chmod +x ./gradlew
@@ -271,12 +249,13 @@ jobs:
           /tmp/gradle-${GRADLE_VERSION}/bin/gradle wrapper --gradle-version "${GRADLE_VERSION}"
           chmod +x ./gradlew
 
-      - name: Commit bootstrap project back to repo (only on manual run)
+      - name: Commit generated project back to repo
+        # 只在手动触发时自动 commit，避免以后 push 死循环
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euxo pipefail
-          git status --porcelain
+
           if [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit."
             exit 0
@@ -286,13 +265,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
-          git commit -m "Bootstrap LSPosed module project"
+          git commit -m "Bootstrap LSPosed Android project"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Build Debug APK
         run: ./gradlew --no-daemon :app:assembleDebug
 
-      - name: Upload Debug APK artifact
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
