@@ -1,0 +1,270 @@
+name: Android LSPosed Autogen & Build
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate Android LSPosed project if not exists
+        id: generate
+        run: |
+          if [ -f settings.gradle ]; then
+            echo "Project already exists, skip generation."
+            echo "generated=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "No project detected, generating Android LSPosed module project..."
+
+          # ---------- 基本目录 ----------
+          mkdir -p app/src/main/java/io/github/pixelnfcjapanskuhook
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/assets
+
+          # ---------- settings.gradle ----------
+          cat > settings.gradle << 'EOF'
+rootProject.name = "PixelNfcJapanSkuHook"
+include ':app'
+EOF
+
+          # ---------- 顶层 build.gradle ----------
+          cat > build.gradle << 'EOF'
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://api.xposed.info/" }
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:7.4.2"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://api.xposed.info/" }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
+EOF
+
+          # ---------- gradle.properties ----------
+          cat > gradle.properties << 'EOF'
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.enableJetifier=true
+EOF
+
+          # ---------- app/build.gradle ----------
+          cat > app/build.gradle << 'EOF'
+apply plugin: 'com.android.application'
+
+android {
+    namespace "io.github.pixelnfcjapanskuhook"
+    compileSdkVersion 34
+
+    defaultConfig {
+        applicationId "io.github.pixelnfcjapanskuhook"
+        minSdkVersion 24
+        targetSdkVersion 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    // Xposed / LSPosed API，仅编译期引用
+    compileOnly 'de.robv.android.xposed:api:82'
+}
+EOF
+
+          # ---------- AndroidManifest.xml ----------
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.pixelnfcjapanskuhook">
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light">
+
+        <!-- 让 LSPosed 识别为模块 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Force PixelNFC isDeviceJapanSku() to return true" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+
+        <!-- 一个简单 Activity，方便看到图标 -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>
+EOF
+
+          # ---------- MainActivity.java ----------
+          cat > app/src/main/java/io/github/pixelnfcjapanskuhook/MainActivity.java << 'EOF'
+package io.github.pixelnfcjapanskuhook;
+
+import android.app.Activity;
+import android.os.Bundle;
+
+public class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+    }
+}
+EOF
+
+          # ---------- XposedInit.java（核心 Hook） ----------
+          cat > app/src/main/java/io/github/pixelnfcjapanskuhook/XposedInit.java << 'EOF'
+package io.github.pixelnfcjapanskuhook;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodReplacement;
+import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+
+import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
+
+public class XposedInit implements IXposedHookLoadPackage {
+
+    @Override
+    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
+
+        // 只 Hook 目标包：Pixel NFC
+        if (!"com.google.android.pixelnfc".equals(lpparam.packageName)) {
+            return;
+        }
+
+        // 将 isDeviceJapanSku(String) 强制返回 true
+        findAndHookMethod(
+                "com.google.android.pixelnfc.provider.DeviceInfoContentProvider",
+                lpparam.classLoader,
+                "isDeviceJapanSku",
+                String.class,
+                new XC_MethodReplacement() {
+                    @Override
+                    protected Object replaceHookedMethod(MethodHookParam param) {
+                        return true;
+                    }
+                }
+        );
+    }
+}
+EOF
+
+          # ---------- layout ----------
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:text="LSPosed PixelNFC JapanSku Hook Module"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</LinearLayout>
+EOF
+
+          # ---------- strings ----------
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+<resources>
+    <string name="app_name">Pixel NFC Japan Hook</string>
+</resources>
+EOF
+
+          # ---------- xposed_init ----------
+          cat > app/src/main/assets/xposed_init << 'EOF'
+io.github.pixelnfcjapanskuhook.XposedInit
+EOF
+
+          # ---------- proguard-rules.pro（可以空着） ----------
+          cat > app/proguard-rules.pro << 'EOF'
+// Proguard rules (currently empty)
+EOF
+
+          echo "generated=true" >> $GITHUB_OUTPUT
+
+      - name: Commit generated project back to repo
+        if: steps.generate.outputs.generated == 'true'
+        run: |
+          echo "Committing generated project files..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Auto-generate Android LSPosed module project"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+
+      - name: Build with Gradle (no wrapper, use remote Gradle)
+        uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: 7.5
+          arguments: assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
