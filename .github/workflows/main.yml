@@ -1,269 +1,298 @@
-name: Android LSPosed Autogen & Build
+name: Bootstrap + Build LSPosed Module
 
 on:
-  push:
-    branches: [ "main" ]
   workflow_dispatch:
+  push:
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - ".github/workflows/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
 
 permissions:
   contents: write
 
 jobs:
-  generate-and-build:
+  bootstrap-and-build:
     runs-on: ubuntu-latest
+
+    env:
+      APP_ID: io.github.pixelnfcjapanskuhook
+      NAMESPACE: io.github.pixelnfcjapanskuhook
+      TARGET_PKG: com.google.android.pixelnfc
+      AGP_VERSION: "8.2.2"
+      GRADLE_VERSION: "8.2"
+      COMPILE_SDK: "34"
+      BUILD_TOOLS: "34.0.0"
+      MIN_SDK: "24"
+      TARGET_SDK: "34"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Generate Android LSPosed project if not exists
-        id: generate
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "tools platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Bootstrap project (generate full Android project if missing)
+        shell: bash
         run: |
-          if [ -f settings.gradle ]; then
-            echo "Project already exists, skip generation."
-            echo "generated=false" >> $GITHUB_OUTPUT
+          set -euxo pipefail
+
+          # 如果已经有 gradlew 和 app/build.gradle，就认为工程已存在（不会重复生成）
+          if [[ -f "gradlew" && -f "app/build.gradle" ]]; then
+            echo "Project already exists, skip bootstrap."
             exit 0
           fi
 
-          echo "No project detected, generating Android LSPosed module project..."
-
-          # ---------- 基本目录 ----------
-          mkdir -p app/src/main/java/io/github/pixelnfcjapanskuhook
+          # ====== 生成目录 ======
+          mkdir -p app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')
           mkdir -p app/src/main/res/layout
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/assets
+          mkdir -p gradle/wrapper
 
-          # ---------- settings.gradle ----------
-          cat > settings.gradle << 'EOF'
-rootProject.name = "PixelNfcJapanSkuHook"
-include ':app'
-EOF
+          # ====== settings.gradle (Groovy) ======
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://api.xposed.info/' }
+              }
+          }
 
-          # ---------- 顶层 build.gradle ----------
-          cat > build.gradle << 'EOF'
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-        maven { url "https://api.xposed.info/" }
-    }
-    dependencies {
-        classpath "com.android.tools.build:gradle:7.4.2"
-    }
-}
+          rootProject.name = "PixelNfcJapanSkuHook"
+          include ':app'
+          EOF
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        maven { url "https://api.xposed.info/" }
-    }
-}
+          # ====== 顶层 build.gradle ======
+          cat > build.gradle <<EOF
+          plugins {
+              id 'com.android.application' version '${AGP_VERSION}' apply false
+          }
+          EOF
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
-}
-EOF
+          # ====== gradle.properties ======
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
 
-          # ---------- gradle.properties ----------
-          cat > gradle.properties << 'EOF'
-org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-android.useAndroidX=true
-android.enableJetifier=true
-EOF
+          # ====== app/build.gradle ======
+          cat > app/build.gradle <<EOF
+          plugins {
+              id 'com.android.application'
+          }
 
-          # ---------- app/build.gradle ----------
-          cat > app/build.gradle << 'EOF'
-apply plugin: 'com.android.application'
+          android {
+              namespace '${NAMESPACE}'
+              compileSdk ${COMPILE_SDK}
 
-android {
-    namespace "io.github.pixelnfcjapanskuhook"
-    compileSdkVersion 34
+              defaultConfig {
+                  applicationId '${APP_ID}'
+                  minSdk ${MIN_SDK}
+                  targetSdk ${TARGET_SDK}
+                  versionCode 1
+                  versionName "1.0"
+              }
 
-    defaultConfig {
-        applicationId "io.github.pixelnfcjapanskuhook"
-        minSdkVersion 24
-        targetSdkVersion 34
-        versionCode 1
-        versionName "1.0"
-    }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+                  debug {
+                      minifyEnabled false
+                  }
+              }
 
-    buildTypes {
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
-        debug {
-            minifyEnabled false
-        }
-    }
-}
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
 
-dependencies {
-    // Xposed / LSPosed API，仅编译期引用
-    compileOnly 'de.robv.android.xposed:api:82'
-}
-EOF
+          dependencies {
+              // Xposed API：必须 compileOnly，运行时由 LSPosed/Xposed 提供
+              compileOnly 'de.robv.android.xposed:api:82'
 
-          # ---------- AndroidManifest.xml ----------
-          cat > app/src/main/AndroidManifest.xml << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.pixelnfcjapanskuhook">
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
+          EOF
 
-    <application
-        android:allowBackup="true"
-        android:label="@string/app_name"
-        android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light">
+          # ====== proguard-rules.pro ======
+          cat > app/proguard-rules.pro <<'EOF'
+          # no-op
+          EOF
 
-        <!-- 让 LSPosed 识别为模块 -->
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="Force PixelNFC isDeviceJapanSku() to return true" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
+          # ====== AndroidManifest.xml ======
+          cat > app/src/main/AndroidManifest.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-        <!-- 一个简单 Activity，方便看到图标 -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+              <application
+                  android:label="@string/app_name"
+                  android:allowBackup="false"
+                  android:supportsRtl="true">
 
-    </application>
+                  <!-- LSPosed / Xposed 模块声明 -->
+                  <meta-data android:name="xposedmodule" android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="Force PixelNFC isDeviceJapanSku() to return true" />
+                  <meta-data android:name="xposedminversion" android:value="82" />
 
-</manifest>
-EOF
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
 
-          # ---------- MainActivity.java ----------
-          cat > app/src/main/java/io/github/pixelnfcjapanskuhook/MainActivity.java << 'EOF'
-package io.github.pixelnfcjapanskuhook;
+              </application>
 
-import android.app.Activity;
-import android.os.Bundle;
+          </manifest>
+          EOF
 
-public class MainActivity extends Activity {
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-    }
-}
-EOF
+          # ====== strings.xml ======
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">Pixel NFC Japan Hook</string>
+          </resources>
+          EOF
 
-          # ---------- XposedInit.java（核心 Hook） ----------
-          cat > app/src/main/java/io/github/pixelnfcjapanskuhook/XposedInit.java << 'EOF'
-package io.github.pixelnfcjapanskuhook;
+          # ====== layout ======
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical"
+              android:gravity="center"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodReplacement;
-import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+              <TextView
+                  android:text="LSPosed PixelNFC JapanSku Hook Module"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content" />
+          </LinearLayout>
+          EOF
 
-import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
+          # ====== MainActivity ======
+          cat > app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')/MainActivity.java <<EOF
+          package ${NAMESPACE};
 
-public class XposedInit implements IXposedHookLoadPackage {
+          import android.os.Bundle;
+          import androidx.appcompat.app.AppCompatActivity;
 
-    @Override
-    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
+          public class MainActivity extends AppCompatActivity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+              }
+          }
+          EOF
 
-        // 只 Hook 目标包：Pixel NFC
-        if (!"com.google.android.pixelnfc".equals(lpparam.packageName)) {
-            return;
-        }
+          # ====== XposedInit (你的 Hook) ======
+          cat > app/src/main/java/$(echo "${NAMESPACE}" | tr '.' '/')/XposedInit.java <<EOF
+          package ${NAMESPACE};
 
-        // 将 isDeviceJapanSku(String) 强制返回 true
-        findAndHookMethod(
-                "com.google.android.pixelnfc.provider.DeviceInfoContentProvider",
-                lpparam.classLoader,
-                "isDeviceJapanSku",
-                String.class,
-                new XC_MethodReplacement() {
-                    @Override
-                    protected Object replaceHookedMethod(MethodHookParam param) {
-                        return true;
-                    }
-                }
-        );
-    }
-}
-EOF
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodReplacement;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
-          # ---------- layout ----------
-          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical"
-    android:gravity="center"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+          import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 
-    <TextView
-        android:text="LSPosed PixelNFC JapanSku Hook Module"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
-</LinearLayout>
-EOF
+          public class XposedInit implements IXposedHookLoadPackage {
 
-          # ---------- strings ----------
-          cat > app/src/main/res/values/strings.xml << 'EOF'
-<resources>
-    <string name="app_name">Pixel NFC Japan Hook</string>
-</resources>
-EOF
+              @Override
+              public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
 
-          # ---------- xposed_init ----------
-          cat > app/src/main/assets/xposed_init << 'EOF'
-io.github.pixelnfcjapanskuhook.XposedInit
-EOF
+                  if (!"${TARGET_PKG}".equals(lpparam.packageName)) return;
 
-          # ---------- proguard-rules.pro（可以空着） ----------
-          cat > app/proguard-rules.pro << 'EOF'
-// Proguard rules (currently empty)
-EOF
+                  findAndHookMethod(
+                          "com.google.android.pixelnfc.provider.DeviceInfoContentProvider",
+                          lpparam.classLoader,
+                          "isDeviceJapanSku",
+                          String.class,
+                          new XC_MethodReplacement() {
+                              @Override
+                              protected Object replaceHookedMethod(MethodHookParam param) {
+                                  return true;
+                              }
+                          }
+                  );
+              }
+          }
+          EOF
 
-          echo "generated=true" >> $GITHUB_OUTPUT
+          # ====== assets/xposed_init ======
+          echo "${NAMESPACE}.XposedInit" > app/src/main/assets/xposed_init
 
-      - name: Commit generated project back to repo
-        if: steps.generate.outputs.generated == 'true'
+          echo "Bootstrap files generated."
+
+      - name: Generate Gradle Wrapper (if missing)
+        shell: bash
         run: |
-          echo "Committing generated project files..."
+          set -euxo pipefail
+          if [[ -f "gradlew" ]]; then
+            echo "Gradle wrapper already exists."
+            chmod +x ./gradlew
+            exit 0
+          fi
+
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          /tmp/gradle-${GRADLE_VERSION}/bin/gradle wrapper --gradle-version "${GRADLE_VERSION}"
+          chmod +x ./gradlew
+
+      - name: Commit bootstrap project back to repo (only on manual run)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git status --porcelain
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Auto-generate Android LSPosed module project"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Set up JDK 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '11'
+          git add -A
+          git commit -m "Bootstrap LSPosed module project"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: 34
-          build-tools: 34.0.0
+      - name: Build Debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
 
-      - name: Build with Gradle (no wrapper, use remote Gradle)
-        uses: gradle/gradle-build-action@v3
-        with:
-          gradle-version: 7.5
-          arguments: assembleDebug
-
-      - name: Upload debug APK
+      - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
